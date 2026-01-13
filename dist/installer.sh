@@ -1169,8 +1169,8 @@ function install_application() {
 
 	# At the moment Hytale requires authentication to download the server files,
 	# so we must install the game binary here vs inside the management console.
-	local GAME_VERS="$("$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" --print-version)"
 	"$GAME_DIR/AppFiles/hytale-downloader-linux-amd64"
+	local GAME_VERS="$("$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" --print-version)"
 	unzip -o "$GAME_DIR/AppFiles/$GAME_VERS.zip" -d "$GAME_DIR/AppFiles/"
 	chown -R $GAME_USER:$GAME_USER "$GAME_DIR/AppFiles/"
 
