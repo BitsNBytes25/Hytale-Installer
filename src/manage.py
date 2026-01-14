@@ -202,7 +202,7 @@ class GameService(BaseService):
 		:param cmd:
 		:return:
 		"""
-		with open('/var/run/%s.sock' % self.service, 'w') as f:
+		with open('/var/run/%s.socket' % self.service, 'w') as f:
 			f.write(cmd + '\n')
 
 	def option_value_updated(self, option: str, previous_value, new_value):
@@ -233,7 +233,7 @@ class GameService(BaseService):
 		"""
 
 		# This game uses sockets for API communication, so it's always enabled if the socket file exists
-		return os.path.exists('/var/run/%s.sock' % self.service)
+		return os.path.exists('/var/run/%s.socket' % self.service)
 
 	def get_player_count(self) -> Union[int, None]:
 		"""
