@@ -2839,6 +2839,9 @@ class GameService(BaseService):
 		:param cmd:
 		:return:
 		"""
+		if not self.is_api_enabled():
+			return None
+
 		with open('/var/run/%s.socket' % self.service, 'w') as f:
 			f.write(cmd + '\n')
 
