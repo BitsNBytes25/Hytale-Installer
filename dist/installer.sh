@@ -1269,6 +1269,8 @@ Service=$GAME_SERVICE.service
 RemoveOnStop=true
 SocketMode=0660
 SocketUser=$GAME_USER
+User=$GAME_USER
+Group=$GAME_USER
 EOF
     systemctl daemon-reload
 
