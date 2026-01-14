@@ -170,8 +170,10 @@ class GameApp(BaseApp):
 			# Just use the system's unzip for extraction, as these files are rather large.
 			print('Extracting game package...')
 			subprocess.run(['unzip', '-o', zip_path, '-d', os.path.join(here, 'AppFiles')])
+			return True
 		else:
 			print('ERROR: Game package %s not found after download!' % zip_path)
+			return False
 
 
 class GameService(BaseService):
