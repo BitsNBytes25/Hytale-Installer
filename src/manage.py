@@ -148,24 +148,26 @@ class GameApp(BaseApp):
 		else:
 			print('No running services found, proceeding with update...')
 
-		# Run the Hytale downloader to get the latest version
-		version = self.get_latest_version()
-		cmd = os.path.join(here, 'AppFiles', 'hytale-downloader-linux-amd64')
-		game_path = os.path.join(here, 'AppFiles')
-		args = [cmd]
-		branch = self.get_option_value('Game Branch')
-		if branch != 'latest':
-			args += ['-patchline', branch]
-		process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=game_path)
-		while True:
-			output = process.stdout.readline()
-			if output == b'' and process.poll() is not None:
-				break
-			if output:
-				print(output.decode().strip())
-		process.wait()
 
+		version = self.get_latest_version()
 		zip_path = os.path.join(here, 'AppFiles', version + '.zip')
+		if not os.path.exists(zip_path):
+			# Run the Hytale downloader to get the latest version
+			cmd = os.path.join(here, 'AppFiles', 'hytale-downloader-linux-amd64')
+			game_path = os.path.join(here, 'AppFiles')
+			args = [cmd]
+			branch = self.get_option_value('Game Branch')
+			if branch != 'latest':
+				args += ['-patchline', branch]
+			process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=game_path)
+			while True:
+				output = process.stdout.readline()
+				if output == b'' and process.poll() is not None:
+					break
+				if output:
+					print(output.decode().strip())
+			process.wait()
+
 		if os.path.exists(zip_path):
 			# Just use the system's unzip for extraction, as these files are rather large.
 			print('Extracting game package...')
