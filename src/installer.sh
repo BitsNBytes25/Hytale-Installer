@@ -89,7 +89,7 @@ function install_application() {
 	fi
 
 	# Preliminary requirements
-	package_install curl sudo python3-venv unzip
+	package_install curl sudo python3-venv python3-pip unzip
 
 	if [ "$FIREWALL" == "1" ]; then
 		if [ "$(get_enabled_firewall)" == "none" ]; then
