@@ -2876,12 +2876,20 @@ class GameApp(BaseApp):
 		"""
 		version = self.get_latest_version()
 
-		if os.path.exists(os.path.join(here, 'AppFiles', version + '.zip')):
-			print('Latest version (%s) is already downloaded.' % version)
-			return False
-		else:
+		if not os.path.exists(os.path.join(here, 'AppFiles', version + '.zip')):
 			print('New version available: %s' % version)
 			return True
+
+		# Check to ensure that services are still available
+		# This is required because as of 2026.01.16, the server will forget its authentication
+		# after a period of inactivity...
+		for svc in self.get_services():
+			if svc.is_running() and svc.get_player_count() is None:
+				print('Service %s appears to have lost authentication, update required to re-authenticate.' % svc.service)
+				return True
+
+		print('Latest version (%s) is already downloaded.' % version)
+		return False
 
 	def update(self):
 		"""
