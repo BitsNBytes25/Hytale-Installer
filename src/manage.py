@@ -1,33 +1,16 @@
 #!/usr/bin/env python3
-import pwd
 import os
 import re
-import random
-import string
-from scriptlets._common.firewall_allow import *
-from scriptlets._common.firewall_remove import *
-from scriptlets.bz_eval_tui.prompt_yn import *
-from scriptlets.bz_eval_tui.prompt_text import *
-from scriptlets.bz_eval_tui.table import *
-from scriptlets.bz_eval_tui.print_header import *
-from scriptlets._common.get_wan_ip import *
-# import:org_python/venv_path_include.py
-import yaml
-# Game application source - what type of game is being installed?
-from scriptlets.warlock.base_app import *
-# from scriptlets.warlock.steam_app import *
-# Game services are usually either an RCON, HTTP, or base type service.
-# Include the necessary type and remove the rest.
-from scriptlets.warlock.base_service import *
-# from scriptlets.warlock.http_service import *
-# from scriptlets.warlock.rcon_service import *
-from scriptlets.warlock.ini_config import *
-from scriptlets.warlock.json_config import *
-from scriptlets.warlock.properties_config import *
-from scriptlets.warlock.default_run import *
+import subprocess
+import time
 
-# For games that use Steam, this provides a quick method for checking for updates
-# from scriptlets.steam.steamcmd_check_app_update import *
+# import:org_python/venv_path_include.py
+from warlock_manager.apps.base_app import BaseApp
+from warlock_manager.services.socket_service import SocketService
+from warlock_manager.config.ini_config import INIConfig
+from warlock_manager.config.json_config import JSONConfig
+from warlock_manager.libs.app_runner import app_runner
+
 
 here = os.path.dirname(os.path.realpath(__file__))
 
@@ -43,13 +26,14 @@ class GameApp(BaseApp):
 		self.name = 'Hytale'
 		self.desc = 'Hytale Dedicated Server'
 		self.services = ('hytale-server',)
+		self.service_handler = GameService
 
 		self.configs = {
 			'manager': INIConfig('manager', os.path.join(here, '.settings.ini'))
 		}
 		self.load()
 
-	def get_save_files(self) -> Union[list, None]:
+	def get_save_files(self) -> list | None:
 		"""
 		Get a list of save files / directories for the game server
 
@@ -60,7 +44,7 @@ class GameApp(BaseApp):
 			files.append(service.get_name())
 		return files
 
-	def get_save_directory(self) -> Union[str, None]:
+	def get_save_directory(self) -> str | None:
 		"""
 		Get the save directory for the game server
 
@@ -197,8 +181,58 @@ class GameApp(BaseApp):
 			print('ERROR: Game package %s not found after download!' % zip_path)
 			return False
 
+	def first_run(self) -> bool:
+		if os.geteuid() != 0:
+			print('ERROR: Please run this script with sudo to perform first-run configuration.')
+			return False
 
-class GameService(BaseService):
+		svc = self.get_services()[0]
+
+		if not os.path.exists(os.path.join(here, 'AppFiles', 'auth.enc')):
+			print('=================================')
+			print('NOTICE: You must authenticate with Hytale during server start!')
+			print('')
+			print('Starting service once to allow authentication, please wait...')
+
+			svc.start()
+			counter = 0
+			while counter < 60:
+				counter += 1
+				if svc.is_running():
+					break
+				time.sleep(1)
+
+			if not svc.is_running():
+				print('ERROR: Service failed to start for authentication, please check logs.')
+				return False
+
+			svc._api_cmd('/auth login device')
+			time.sleep(1)
+			svc.print_logs()
+
+			# Wait until the user follows the prompts.
+			counter = 0
+			auth_successful = False
+			while counter < 600:
+				counter += 1
+				logs = svc.get_logs()
+				if 'Authentication successful' in logs:
+					print('Authentication successful!')
+					auth_successful = True
+					break
+				time.sleep(1)
+
+			if auth_successful:
+				# Authentication successful, save the token in an encrypted file so we don't have to do this BS again
+				svc._api_cmd('/auth persistence Encrypted')
+				time.sleep(2)
+				svc._api_cmd('/auth status')
+				time.sleep(2)
+			svc.stop()
+		return True
+
+
+class GameService(SocketService):
 	"""
 	Service definition and handler
 	"""
@@ -208,38 +242,13 @@ class GameService(BaseService):
 		:param file:
 		"""
 		super().__init__(service, game)
-		self.service = service
-		self.game = game
+		self.socket = '/var/run/%s.socket' % self.service
 		self.configs = {
 			'config': JSONConfig('config', os.path.join(here, 'AppFiles/config.json'))
 		}
 		self.load()
 
-	def _api_cmd(self, cmd):
-		"""
-		Send a command to the game server via its Systemd socket
-
-		:param cmd:
-		:return:
-		"""
-		if not self.is_api_enabled():
-			return None
-
-		with open('/var/run/%s.socket' % self.service, 'w') as f:
-			f.write(cmd + '\n')
-
-		return True
-
-	def is_api_enabled(self) -> bool:
-		"""
-		Check if API is enabled for this service
-		:return:
-		"""
-
-		# This game uses sockets for API communication, so it's always enabled if the socket file exists
-		return os.path.exists('/var/run/%s.socket' % self.service)
-
-	def get_players(self) -> Union[list, None]:
+	def get_players(self) -> list | None:
 		"""
 		Get a list of current players on the server, or None if the API is unavailable
 		:return:
@@ -249,7 +258,7 @@ class GameService(BaseService):
 		# If there are 10 players connected, it's just the last player 10 times.
 		return None
 
-	def get_player_count(self) -> Union[int, None]:
+	def get_player_count(self) -> int | None:
 		"""
 		Get the current player count on the server, or None if the API is unavailable
 		:return:
@@ -301,7 +310,7 @@ class GameService(BaseService):
 		"""
 		return self.get_option_value('Server Name')
 
-	def get_port(self) -> Union[int, None]:
+	def get_port(self) -> int | None:
 		"""
 		Get the primary port of the service, or None if not applicable
 		:return:
@@ -335,64 +344,6 @@ class GameService(BaseService):
 		self._api_cmd('/world save')
 
 
-def menu_first_run(game: GameApp):
-	"""
-	Perform first-run configuration for setting up the game server initially
-
-	:param game:
-	:return:
-	"""
-	print_header('First Run Configuration')
-
-	if os.geteuid() != 0:
-		print('ERROR: Please run this script with sudo to perform first-run configuration.')
-		sys.exit(1)
-
-	svc = game.get_services()[0]
-
-	if not os.path.exists(os.path.join(here, 'AppFiles', 'auth.enc')):
-		print('=================================')
-		print('NOTICE: You must authenticate with Hytale during server start!')
-		print('')
-		print('Starting service once to allow authentication, please wait...')
-
-		svc.start()
-		counter = 0
-		while counter < 60:
-			counter += 1
-			if svc.is_running():
-				break
-			time.sleep(1)
-
-		if not svc.is_running():
-			print('ERROR: Service failed to start for authentication, please check logs.')
-			sys.exit(1)
-
-		svc._api_cmd('/auth login device')
-		time.sleep(1)
-		svc.print_logs()
-
-		# Wait until the user follows the prompts.
-		counter = 0
-		auth_successful = False
-		while counter < 600:
-			counter += 1
-			logs = svc.get_logs()
-			if 'Authentication successful' in logs:
-				print('Authentication successful!')
-				auth_successful = True
-				break
-			time.sleep(1)
-
-		if auth_successful:
-			# Authentication successful, save the token in an encrypted file so we don't have to do this BS again
-			svc._api_cmd('/auth persistence Encrypted')
-			time.sleep(2)
-			svc._api_cmd('/auth status')
-			time.sleep(2)
-		svc.stop()
-
-
 if __name__ == '__main__':
-	game = GameApp()
-	run_manager(game)
+	app = app_runner(GameApp())
+	app()

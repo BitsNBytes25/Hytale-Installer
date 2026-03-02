@@ -75,26 +75,28 @@ GAME_BRANCH="latest"
 BRANCH="main"
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-		--uninstall) MODE_UNINSTALL=1; shift 1;;
-		--dir=*)
-			OVERRIDE_DIR="${1#*=}";
+		--uninstall) MODE_UNINSTALL=1;;
+		--dir=*|--dir)
+			[ "$1" == "--dir" ] && shift 1 && OVERRIDE_DIR="$1" || OVERRIDE_DIR="${1#*=}"
 			[ "${OVERRIDE_DIR:0:1}" == "'" ] && [ "${OVERRIDE_DIR:0-1}" == "'" ] && OVERRIDE_DIR="${OVERRIDE_DIR:1:-1}"
 			[ "${OVERRIDE_DIR:0:1}" == '"' ] && [ "${OVERRIDE_DIR:0-1}" == '"' ] && OVERRIDE_DIR="${OVERRIDE_DIR:1:-1}"
-			shift 1;;
-		--skip-firewall) SKIP_FIREWALL=1; shift 1;;
-		--non-interactive) NONINTERACTIVE=1; shift 1;;
-		--game-branch=*)
-			GAME_BRANCH="${1#*=}";
+			;;
+		--skip-firewall) SKIP_FIREWALL=1;;
+		--non-interactive) NONINTERACTIVE=1;;
+		--game-branch=*|--game-branch)
+			[ "$1" == "--game-branch" ] && shift 1 && GAME_BRANCH="$1" || GAME_BRANCH="${1#*=}"
 			[ "${GAME_BRANCH:0:1}" == "'" ] && [ "${GAME_BRANCH:0-1}" == "'" ] && GAME_BRANCH="${GAME_BRANCH:1:-1}"
 			[ "${GAME_BRANCH:0:1}" == '"' ] && [ "${GAME_BRANCH:0-1}" == '"' ] && GAME_BRANCH="${GAME_BRANCH:1:-1}"
-			shift 1;;
-		--branch=*)
-			BRANCH="${1#*=}";
+			;;
+		--branch=*|--branch)
+			[ "$1" == "--branch" ] && shift 1 && BRANCH="$1" || BRANCH="${1#*=}"
 			[ "${BRANCH:0:1}" == "'" ] && [ "${BRANCH:0-1}" == "'" ] && BRANCH="${BRANCH:1:-1}"
 			[ "${BRANCH:0:1}" == '"' ] && [ "${BRANCH:0-1}" == '"' ] && BRANCH="${BRANCH:1:-1}"
-			shift 1;;
+			;;
 		-h|--help) usage;;
+		*) echo "Unknown argument: $1" >&2; usage;;
 	esac
+	shift 1
 done
 
 ##
@@ -1187,7 +1189,7 @@ function install_application() {
 	#  sudo -u $GAME_USER $GAME_DIR/.venv/bin/pip install rcon
 
 	# Set the requested game branch for the manager to use
-	sudo -u $GAME_USER $GAME_DIR/manage.py --set-config "Game Branch" "$GAME_BRANCH"
+	sudo -u $GAME_USER $GAME_DIR/manage.py set-config "Game Branch" "$GAME_BRANCH"
 
 	# Install installer (this script) for uninstallation or manual work
 	download "https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/dist/installer.sh" "$GAME_DIR/installer.sh"
@@ -1195,7 +1197,7 @@ function install_application() {
 	chown $GAME_USER:$GAME_USER "$GAME_DIR/installer.sh"
 	
 	# Use the management script to install the game server
-	if ! $GAME_DIR/manage.py --update; then
+	if ! $GAME_DIR/manage.py update; then
 		echo "Could not install $GAME_DESC, exiting" >&2
 		exit 1
 	fi
@@ -1257,7 +1259,7 @@ function postinstall() {
 	print_header "Performing postinstall"
 
 	# First run setup
-	$GAME_DIR/manage.py --first-run
+	$GAME_DIR/manage.py first-run
 }
 
 ##
@@ -1276,6 +1278,7 @@ function uninstall_application() {
 
 	# Service files
 	[ -e "/etc/systemd/system/${GAME_SERVICE}.service" ] && rm "/etc/systemd/system/${GAME_SERVICE}.service"
+	[ -e "/etc/systemd/system/${GAME_SERVICE}.socket" ] && rm "/etc/systemd/system/${GAME_SERVICE}.socket"
 
 	# Game files
 	[ -d "$GAME_DIR" ] && rm -rf "$GAME_DIR/AppFiles"
