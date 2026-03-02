@@ -1226,8 +1226,8 @@ StandardError=journal
 WorkingDirectory=$GAME_DIR/AppFiles
 Environment=XDG_RUNTIME_DIR=/run/user/$(id -u $GAME_USER)
 ExecStart=${JAVA_PATH}bin/java -server -Xms1024M -Xmx16G -XX:MaxMetaspaceSize=512M -XX:+UnlockExperimentalVMOptions -XX:+UseShenandoahGC -XX:ShenandoahGCHeuristics=compact -XX:ShenandoahUncommitDelay=30000 -XX:ShenandoahAllocationThreshold=15 -XX:ShenandoahGuaranteedGCInterval=30000 -XX:+PerfDisableSharedMem -XX:+DisableExplicitGC -XX:+ParallelRefProcEnabled -XX:ParallelGCThreads=4 -XX:ConcGCThreads=2 -XX:+AlwaysPreTouch -jar $GAME_DIR/AppFiles/Server/HytaleServer.jar --assets $GAME_DIR/AppFiles/Assets.zip --accept-early-plugins
-ExecStop=$GAME_DIR/manage.py --pre-stop --service ${GAME_SERVICE}
-ExecStartPost=$GAME_DIR/manage.py --post-start --service ${GAME_SERVICE}
+ExecStop=$GAME_DIR/manage.py pre-stop --service ${GAME_SERVICE}
+ExecStartPost=$GAME_DIR/manage.py post-start --service ${GAME_SERVICE}
 Restart=on-failure
 RestartSec=1800s
 TimeoutStartSec=600s
