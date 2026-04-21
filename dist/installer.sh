@@ -1244,6 +1244,9 @@ function upgrade_application_1_0() {
 function upgrade_application_2_1() {
 	if [ -e "$GAME_DIR/AppFiles/Server/HytaleServer.jar" ]; then
 
+		[ -e "$GAME_DIR/Configs" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/Configs"
+		[ -e "$GAME_DIR/Packages" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/Packages"
+
 		# 2.2 introduces multi-binary support for game servers, so if the server is present in the legacy path,
 		# move it to its new destination.
 		[ -d "$GAME_DIR/AppFiles/hytale-server" ] || mkdir -p "$GAME_DIR/AppFiles/hytale-server"
