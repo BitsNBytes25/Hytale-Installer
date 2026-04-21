@@ -56,10 +56,9 @@ GAME_SERVICE="hytale-server"
 # scriptlet:bz_eval_tui/prompt_text.sh
 # scriptlet:bz_eval_tui/prompt_yn.sh
 # scriptlet:bz_eval_tui/print_header.sh
-# scriptlet:ufw/install.sh
+# scriptlet:_common/firewall_install.sh
 # scriptlet:warlock/install_warlock_manager.sh
 # scriptlet:openjdk/install.sh
-# scriptlet:_common/firewall_allow.sh
 
 print_header "$GAME_DESC *unofficial* Installer"
 
@@ -75,7 +74,6 @@ print_header "$GAME_DESC *unofficial* Installer"
 #   GAME_DIR     - Directory to install the game into
 #   STEAM_ID     - Steam App ID of the game
 #   GAME_DESC    - Description of the game (for logging purposes)
-#   GAME_SERVICE - Service name to install with Systemd
 #   SAVE_DIR     - Directory to store game save files
 #
 function install_application() {
@@ -88,76 +86,36 @@ function install_application() {
 		useradd -m -U $GAME_USER
 	fi
 
+	# Ensure the target directory exists and is owned by the game user
+	if [ ! -d "$GAME_DIR" ]; then
+		mkdir -p "$GAME_DIR"
+		chown $GAME_USER:$GAME_USER "$GAME_DIR"
+	fi
+
 	# Preliminary requirements
 	package_install curl sudo python3-venv python3-pip unzip
 
 	if [ "$FIREWALL" == "1" ]; then
 		if [ "$(get_enabled_firewall)" == "none" ]; then
 			# No firewall installed, go ahead and install UFW
-			install_ufw
+			firewall_install
 		fi
 	fi
 
 	[ -e "$GAME_DIR/AppFiles" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/AppFiles"
+	[ -e "$GAME_DIR/Configs" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/Configs"
+	[ -e "$GAME_DIR/Packages" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/Packages"
 
 	# Hytale requires Java and recommends JRE 25.x, so manually install it so we can ensure compatibility.
-	local JAVA_PATH="$(install_openjdk 25)"
-
-	# They also ship their own downloader, so grab that too
-	download https://downloader.hytale.com/hytale-downloader.zip "$GAME_DIR/AppFiles/hytale-downloader.zip"
-	unzip -o "$GAME_DIR/AppFiles/hytale-downloader.zip" -d "$GAME_DIR/AppFiles/"
-
-	# At the moment Hytale requires authentication to download the server files,
-	# so we must install the game binary here vs inside the management console.
-	cd "$GAME_DIR/AppFiles/"
-	echo ""
-	echo ""
-	echo "====================================================="
-	echo ""
-	echo " IMPORTANT: Hytale Server Requires Authentication! "
-	echo ""
-	echo "====================================================="
-	echo ""
-	echo "You may be prompted to open a URL in your web browser to"
-	echo "authenticate your server."
-	echo ""
-	echo "Please open the link and authenticate if prompted."
-	./hytale-downloader-linux-amd64 -print-version
-	cd -
-	chown -R $GAME_USER:$GAME_USER "$GAME_DIR/AppFiles/"
-
+	install_openjdk 25
 	
 	# Install the management script
-	install_warlock_manager "$REPO" "$BRANCH"
-
-	# If other PIP packages are required for your management interface,
-	# add them here as necessary, for example for RCON support:
-	#  sudo -u $GAME_USER $GAME_DIR/.venv/bin/pip install rcon
-
-	# Set the requested game branch for the manager to use
-	sudo -u $GAME_USER $GAME_DIR/manage.py set-config "Game Branch" "$GAME_BRANCH"
+	install_warlock_manager "$REPO" "$BRANCH" 2.2.6
 
 	# Install installer (this script) for uninstallation or manual work
 	download "https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/dist/installer.sh" "$GAME_DIR/installer.sh"
 	chmod +x "$GAME_DIR/installer.sh"
 	chown $GAME_USER:$GAME_USER "$GAME_DIR/installer.sh"
-	
-	# Use the management script to install the game server
-	if ! $GAME_DIR/manage.py update; then
-		echo "Could not install $GAME_DESC, exiting" >&2
-		exit 1
-	fi
-
-	firewall_allow --port 5520 --udp --comment "${GAME_DESC} Game Port"
-
-	# Install system service file to be loaded by systemd
-    cat > /etc/systemd/system/${GAME_SERVICE}.service <<EOF
-# script:systemd-template.service
-EOF
-	cat > /etc/systemd/system/${GAME_SERVICE}.socket <<EOF
-# script:systemd-template.socket
-EOF
-    systemctl daemon-reload
 
 	if [ -n "$WARLOCK_GUID" ]; then
 		# Register Warlock
@@ -174,6 +132,90 @@ function postinstall() {
 }
 
 ##
+# Upgrade logic for 1.0 to 2.2 to handle migration of ENV and overrides
+#
+function upgrade_application_1_0() {
+	local LEGACY_SERVICE="hytale-server"
+	local SERVICE_PATH="/etc/systemd/system/${LEGACY_SERVICE}.service"
+
+	# Migrate existing service to new format
+	# This gets overwrote by the manager, but is needed to tell the system that the service is here.
+	if [ -e "${SERVICE_PATH}" ] && [ ! -e "$GAME_DIR/Environments" ]; then
+		sudo -u $GAME_USER mkdir -p "$GAME_DIR/Environments"
+		# Extract out current environment variables from the systemd file into their own dedicated file
+		egrep '^Environment' "${SERVICE_PATH}" | sed 's:^Environment=::' > "$GAME_DIR/Environments/${LEGACY_SERVICE}.env"
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/Environments/${LEGACY_SERVICE}.env"
+		# Trim out those envs now that they're not longer required
+		cat "${SERVICE_PATH}" | egrep -v '^Environment=' > "${SERVICE_PATH}.new"
+		mv "${SERVICE_PATH}.new" "${SERVICE_PATH}"
+
+		if [ -e "${SERVICE_PATH}.d" ] && [ -e "${SERVICE_PATH}.d/override.conf" ]; then
+			# If there is an override, (used in version 1.0),
+			# grab the CLI and move it to a notes document so the operator can manually review it.
+			touch "$GAME_DIR/Notes.txt"
+			echo "    !! IMPORTANT - Service commands are now generated dynamically, " >> "$GAME_DIR/Notes.txt"
+			echo "    so please manually migrate the following CLI options to your game." >> "$GAME_DIR/Notes.txt"
+			echo "" >> "$GAME_DIR/Notes.txt"
+			egrep '^ExecStart=' "${SERVICE_PATH}.d/override.conf" >> "$GAME_DIR/Notes.txt"
+			chown $GAME_USER:$GAME_USER "$GAME_DIR/Notes.txt"
+			rm -fr "${SERVICE_PATH}.d/override.conf"
+			rm -fr "${SERVICE_PATH}.d"
+		fi
+	fi
+}
+
+##
+# Upgrade handler for 2.1 to 2.2
+function upgrade_application_2_1() {
+	if [ -e "$GAME_DIR/AppFiles/Server/HytaleServer.jar" ]; then
+
+		# 2.2 introduces multi-binary support for game servers, so if the server is present in the legacy path,
+		# move it to its new destination.
+		[ -d "$GAME_DIR/AppFiles/hytale-server" ] || mkdir -p "$GAME_DIR/AppFiles/hytale-server"
+		mv "$GAME_DIR/AppFiles/Server" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -d "$GAME_DIR/AppFiles/logs" ] && mv "$GAME_DIR/AppFiles/logs" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -d "$GAME_DIR/AppFiles/mods" ] && mv "$GAME_DIR/AppFiles/mods" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -d "$GAME_DIR/AppFiles/universe" ] && mv "$GAME_DIR/AppFiles/universe" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -e "$GAME_DIR/AppFiles/Assets.zip" ] && mv "$GAME_DIR/AppFiles/Assets.zip" "$GAME_DIR/AppFiles/hytale-server/Assets.zip"
+		[ -e "$GAME_DIR/AppFiles/auth.enc" ] && [ ! -e "$GAME_DIR/Configs/auth.enc" ] && cp "$GAME_DIR/AppFiles/auth.enc" "$GAME_DIR/Configs/auth.enc"
+		[ -e "$GAME_DIR/AppFiles/auth.enc" ] && mv "$GAME_DIR/AppFiles/auth.enc" "$GAME_DIR/AppFiles/hytale-server/auth.enc"
+		[ -e "$GAME_DIR/AppFiles/bans.json" ] && mv "$GAME_DIR/AppFiles/bans.json" "$GAME_DIR/AppFiles/hytale-server/bans.json"
+		[ -e "$GAME_DIR/AppFiles/config.json" ] && mv "$GAME_DIR/AppFiles/config.json" "$GAME_DIR/AppFiles/hytale-server/config.json"
+		[ -e "$GAME_DIR/AppFiles/permissions.json" ] && mv "$GAME_DIR/AppFiles/permissions.json" "$GAME_DIR/AppFiles/hytale-server/permissions.json"
+		[ -e "$GAME_DIR/AppFiles/whitelist.json" ] && mv "$GAME_DIR/AppFiles/whitelist.json" "$GAME_DIR/AppFiles/hytale-server/whitelist.json"
+		[ -e "$GAME_DIR/AppFiles/universe.tgz" ] && mv "$GAME_DIR/AppFiles/universe.tgz" "$GAME_DIR/AppFiles/hytale-server/universe.tgz"
+
+		# Move update zips to the Packages directory
+		for pkg in "$GAME_DIR/AppFiles/"*.zip; do
+			file="$(basename $pkg)"
+			if [ "$file" != "*.zip" ]; then
+				mv "$GAME_DIR/AppFiles/$file" "$GAME_DIR/Packages/$file"
+			fi
+		done
+
+		# Move the updater to the Packages directory
+		[ -e "$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" ] && mv "$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" "$GAME_DIR/Packages/hytale-downloader-linux-amd64"
+		[ -e "$GAME_DIR/AppFiles/hytale-downloader-windows-amd64.exe" ] && mv "$GAME_DIR/AppFiles/hytale-downloader-windows-amd64.exe" "$GAME_DIR/Packages/hytale-downloader-windows-amd64.exe"
+
+		# Chown everything to the appropriate user
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/AppFiles" -R
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/Packages" -R
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/Configs" -R
+	fi
+}
+
+##
+# Perform any steps necessary for upgrading an existing installation.
+#
+function upgrade_application() {
+	print_header "Existing installation detected, performing upgrade"
+
+	# Uncomment if you need this
+	upgrade_application_1_0
+	upgrade_application_2_1
+}
+
+##
 # Uninstall the game server
 #
 # Expects the following variables:
@@ -184,15 +226,7 @@ function postinstall() {
 function uninstall_application() {
 	print_header "Performing uninstall_application"
 
-	systemctl disable $GAME_SERVICE
-	systemctl stop $GAME_SERVICE
-
-	# Service files
-	[ -e "/etc/systemd/system/${GAME_SERVICE}.service" ] && rm "/etc/systemd/system/${GAME_SERVICE}.service"
-	[ -e "/etc/systemd/system/${GAME_SERVICE}.socket" ] && rm "/etc/systemd/system/${GAME_SERVICE}.socket"
-
-	# Game files
-	[ -d "$GAME_DIR" ] && rm -rf "$GAME_DIR/AppFiles"
+	$GAME_DIR/manage.py remove --confirm
 
 	# Management scripts
 	[ -e "$GAME_DIR/manage.py" ] && rm "$GAME_DIR/manage.py"
@@ -211,16 +245,28 @@ function uninstall_application() {
 
 if [ $MODE_UNINSTALL -eq 1 ]; then
 	MODE="uninstall"
+elif [ -e "$GAME_DIR/AppFiles" ]; then
+	MODE="reinstall"
 else
 	# Default to install mode
 	MODE="install"
 fi
 
 
-if systemctl -q is-active $GAME_SERVICE; then
-	echo "$GAME_DESC service is currently running, please stop it before running this installer."
-	echo "You can do this with: sudo systemctl stop $GAME_SERVICE"
-	exit 1
+if [ -e "$GAME_DIR/Environments" ]; then
+	# Check for existing service files to determine if the service is running.
+	# This is important to prevent conflicts with the installer trying to modify files while the service is running.
+	for envfile in "$GAME_DIR/Environments/"*.env; do
+		SERVICE=$(basename "$envfile" .env)
+		# If there are no services, this will just be '*.env'.
+		if [ "$SERVICE" != "*" ]; then
+			if systemctl -q is-active $SERVICE; then
+				echo "$GAME_DESC service is currently running, please stop all instances before running this installer."
+				echo "You can do this with: sudo systemctl stop $SERVICE"
+				exit 1
+			fi
+		fi
+	done
 fi
 
 if [ -n "$OVERRIDE_DIR" ]; then
@@ -246,11 +292,6 @@ else
 	echo "Using default installation directory of ${GAME_DIR}"
 fi
 
-if [ -e "/etc/systemd/system/${GAME_SERVICE}.service" ]; then
-	EXISTING=1
-else
-	EXISTING=0
-fi
 
 ############################################
 ## Installer
@@ -275,6 +316,26 @@ if [ "$MODE" == "install" ]; then
     print_header "$GAME_DESC Installation Complete"
 fi
 
+# Operations needed to be performed during a reinstallation / upgrade
+if [ "$MODE" == "reinstall" ]; then
+
+	FIREWALL=0
+
+	upgrade_application
+
+	install_application
+
+	postinstall
+
+	# Print some instructions and useful tips
+    print_header "$GAME_DESC Installation Complete"
+
+	# If there are notes generated during installation, print them now.
+    if [ -e "$GAME_DIR/Notes.txt" ]; then
+    	cat "$GAME_DIR/Notes.txt"
+	fi
+fi
+
 if [ "$MODE" == "uninstall" ]; then
 	if [ $NONINTERACTIVE -eq 0 ]; then
 		if prompt_yn -q --invert --default-no "This will remove all game binary content"; then
@@ -286,8 +347,10 @@ if [ "$MODE" == "uninstall" ]; then
 	fi
 
 	if prompt_yn -q --default-yes "Perform a backup before everything is wiped?"; then
-		$GAME_DIR/manage.py --backup
+		$GAME_DIR/manage.py backup
 	fi
 
 	uninstall_application
 fi
+
+}

@@ -745,26 +745,96 @@ function install_ufw() {
 		ufw allow from $TTY_IP comment 'Anti-lockout rule based on first install of UFW'
 	fi
 }
+
+##
+# Install firewalld
+#
+# CHANGELOG:
+#   2026.03.16 - Switch awk to use $NF for better support
+#
+function install_firewalld() {
+	package_install firewalld
+
+	# Auto-add the current user's remote IP to the whitelist (anti-lockout rule)
+	local TTY_IP="$(who am i | awk '{print $NF}' | sed 's/[()]//g')"
+	if [ -n "$TTY_IP" ]; then
+		# Anti-lockout rule based on first install of firewalld
+		firewall-cmd --zone=trusted --add-source=$TTY_IP --permanent
+	fi
+}
+
+##
+# Install the system default firewall based on the OS type
+#
+# For Debian/Ubuntu, this installs UFW
+# For RHEL/CentOS, this installs firewalld
+# For SUSE, this installs firewalld
+# For other OS types, this defaults to installing UFW
+#
+function firewall_install() {
+	local FIREWALL
+
+	FIREWALL=$(get_available_firewall)
+	if [ "$FIREWALL" != "none" ]; then
+		return
+	fi
+
+	if os_like_debian -q; then
+		install_ufw
+	elif os_like_rhel -q; then
+		install_firewalld
+	elif os_like_suse -q; then
+		install_firewalld
+	else
+		install_ufw
+	fi
+}
 ##
 # Install the management script from the project's repo
 #
 # Expects the following variables:
 #   GAME_USER    - User account to install the game under
 #   GAME_DIR     - Directory to install the game into
+#   WARLOCK_GUID - Warlock GUID for this game
 #
-# @param $1 Repo Name (e.g., user/repo)
-# @param $2 Branch Name (default: main)
+# @param $1 Application Repo Name (e.g., user/repo)
+# @param $2 Application Branch Name (default: main)
+# @param $3 Warlock Manager Branch to use (default: release-v2)
 #
 # CHANGELOG:
+#   20260326 - Add support for full version strings
+#   20260325 - Update to install warlock-manager from PyPI if a version number is specified instead of a branch name
+#   20260319 - Add third option to specify the version of Warlock Manager to use as the base
 #   20260301 - Update to install warlock-manager from github (along with its dependencies) as a pip package
 #
 function install_warlock_manager() {
 	print_header "Performing install_management"
 
 	# Install management console and its dependencies
+
+	# Source URL to download the application from
 	local SRC=""
+	# Github repository of the source application
 	local REPO="$1"
+	# Branch of the source application to download from (default: main)
 	local BRANCH="${2:-main}"
+	# Branch of Warlock Manager to install (default: release-v2)
+	local MANAGER_BRANCH="${3:-release-v2}"
+	local MANAGER_SOURCE
+	local MANAGER_SHA
+
+	if [[ "$MANAGER_BRANCH" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+		# Support 1.2.3 version strings; indicates at least .3 of the revision.
+		MANAGER_SOURCE="pip"
+		MANAGER_BRANCH=">=${MANAGER_BRANCH},<=$(echo $MANAGER_BRANCH | sed 's:\.[0-9]*$:.9999:')"
+	elif [[ "$MANAGER_BRANCH" =~ ^[0-9]+\.[0-9]+$ ]]; then
+		# Support 1.2 version strings; indicates it just must be within this API version
+        MANAGER_SOURCE="pip"
+        MANAGER_BRANCH=">=${MANAGER_BRANCH}.0,<=${MANAGER_BRANCH}.9999"
+    else
+    	# Not a version string, probably a branch name instead.
+        MANAGER_SOURCE="github"
+    fi
 
 	SRC="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/dist/manage.py"
 
@@ -775,6 +845,26 @@ function install_warlock_manager() {
 
 	chown $GAME_USER:$GAME_USER "$GAME_DIR/manage.py"
 	chmod +x "$GAME_DIR/manage.py"
+
+	# Record the hash of the install and branch name for display in the management UI and checking for updates.
+	# We use the direct hash because installation scripts may not necessarily use tagged versions.
+	MANAGER_SHA="$(curl -s "https://api.github.com/repos/${REPO}/commits/${BRANCH}" \
+        | grep '"sha":' \
+        | head -n 1 \
+        | sed -E 's/.*"sha": *"([^"]+)".*/\1/')"
+
+	# Record this hash along with the branch into a file accessible by the manager.
+	# This will be read by the Python, so JSON is fine.
+	cat > "$GAME_DIR/.manage.json" <<EOF
+{
+	"source": "github",
+	"repo": "${REPO}",
+	"branch": "${BRANCH}",
+	"commit": "${MANAGER_SHA}",
+	"game": "${WARLOCK_GUID}"
+}
+EOF
+	chown $GAME_USER:$GAME_USER "$GAME_DIR/.manage.json"
 
 	# Install configuration definitions
 	cat > "$GAME_DIR/configs.yaml" <<EOF
@@ -818,7 +908,7 @@ config:
       - Adventure
       - Creative
       - Survival
-manager:
+service:
   - name: Game Branch
     section: Version
     key: game_branch
@@ -828,6 +918,42 @@ manager:
     options:
       - latest
       - pre-release
+    group: Settings
+  - name: Authentication Mode
+    section: JarParams
+    key: auth-mode
+    type: str
+    options:
+      - authenticated
+      - offline
+      - insecure
+    default: authenticated
+    group: Settings
+  - name: Bind Port
+    section: JarParams
+    key: bind
+    type: int
+    default: 5520
+    group: Settings
+  - name: Accept Early Plugins
+    section: JarParams
+    key: accept-early-plugins
+    type: bool
+    default: true
+    group: Settings
+  - name: Java Initial Heap Size
+    section: JavaParams
+    key: Xms
+    type: str
+    default: 1024M
+    group: Settings
+  - name: Java Maximum Heap Size
+    section: JavaParams
+    key: Xmx
+    type: str
+    default: 16G
+    group: Settings
+manager:
   - name: Delayed Shutdown Warning
     section: Messages
     key: shutdown_delayed
@@ -921,7 +1047,22 @@ EOF
 	# A python virtual environment is now required by Warlock-based managers.
 	sudo -u $GAME_USER python3 -m venv "$GAME_DIR/.venv"
 	sudo -u $GAME_USER "$GAME_DIR/.venv/bin/pip" install --upgrade pip
-	sudo -u $GAME_USER "$GAME_DIR/.venv/bin/pip" install warlock-manager@git+https://github.com/BitsNBytes25/Warlock-Manager.git@main
+	if [ "$MANAGER_SOURCE" == "pip" ]; then
+		# Install from PyPI with version specifier
+		sudo -u $GAME_USER "$GAME_DIR/.venv/bin/pip" install "warlock-manager${MANAGER_BRANCH}"
+	else
+		# Install directly from GitHub
+		sudo -u $GAME_USER "$GAME_DIR/.venv/bin/pip" install warlock-manager@git+https://github.com/BitsNBytes25/Warlock-Manager.git@$MANAGER_BRANCH
+	fi
+
+	# Ensure warlock lib directory exists for supplemental data
+	[ -d "/var/lib/warlock" ] || mkdir -p "/var/lib/warlock"
+	[ -e /var/lib/warlock/.auth ] || touch /var/lib/warlock/.auth
+    # Ensure it's a valid 64-character hash
+    if [ "$(cat /var/lib/warlock/.auth | wc -c)" != "64" ]; then
+    	cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 64 | head -n 1 | tr -d '\n' > "/var/lib/warlock/.auth"
+    fi
+	[ -e "/var/lib/warlock/.email" ] || touch /var/lib/warlock/.email
 }
 
 
@@ -935,6 +1076,10 @@ EOF
 # Will print the directory where OpenJDK was installed.
 #
 # CHANGELOG:
+#   2026.04.13 - Mute curl output
+#   2026.03.07 - Bugfix to fix 'path-jre//bin/java'
+#   2026.03.05 - Add support for update-alternatives / alternatives.
+#   2026.03.03 - Bugfix, return the correct JDK directory.
 #   2026.01.13 - Initial version
 #
 function install_openjdk() {
@@ -954,7 +1099,7 @@ function install_openjdk() {
 	# We will use this directory as a working directory for source files that need downloaded.
 	[ -d /opt/script-collection ] || mkdir -p /opt/script-collection
 
-	local DOWNLOAD_URL="$(curl https://api.github.com/repos/adoptium/temurin${VERSION}-binaries/releases/latest \
+	local DOWNLOAD_URL="$(curl -s https://api.github.com/repos/adoptium/temurin${VERSION}-binaries/releases/latest \
 	  | grep browser_download_url \
 	  | grep jre_x64_linux \
 	  | grep 'tar\.gz"' \
@@ -970,153 +1115,25 @@ function install_openjdk() {
 	fi
 
 	local JDK_DIR="$(tar -zf "/opt/script-collection/$JDK_TGZ" --list | head -1)"
+	# Remove any trailing '/'
+	JDK_DIR="${JDK_DIR%/}"
 
 	if [ ! -e "/opt/script-collection/$JDK_DIR" ]; then
 		tar -x -C /opt/script-collection/ -f "/opt/script-collection/$JDK_TGZ"
 	fi
 
+	# Update distro registrations for alternative software.
+	if os_like debian; then
+		update-alternatives --install "/usr/bin/java" "java" "/opt/script-collection/$JDK_DIR/bin/java" 1
+	elif os_like rhel; then
+		alternatives --install "/usr/bin/java" "java" "/opt/script-collection/$JDK_DIR/bin/java" 1
+	elif os_like suse; then
+		update-alternatives --install "/usr/bin/java" "java" "/opt/script-collection/$JDK_DIR/bin/java" 1
+	fi
+
 	echo "/opt/script-collection/$JDK_DIR"
 }
-##
-# Add an "allow" rule to the firewall in the INPUT chain
-#
-# Arguments:
-#   --port <port>       Port(s) to allow
-#   --source <source>   Source IP to allow (default: any)
-#   --zone <zone>       Zone to allow (default: public)
-#   --tcp|--udp         Protocol to allow (default: tcp)
-#   --proto <tcp|udp>   Protocol to allow (alternative method)
-#   --comment <comment> (only UFW) Comment for the rule
-#
-# Specify multiple ports with `--port '#,#,#'` or a range `--port '#:#'`
-#
-# CHANGELOG:
-#   2025.11.23 - Use return codes instead of exit to allow the caller to handle errors
-#   2025.04.10 - Add "--proto" argument as alternative to "--tcp|--udp"
-#
-function firewall_allow() {
-	# Defaults and argument processing
-	local PORT=""
-	local PROTO="tcp"
-	local SOURCE="any"
-	local FIREWALL=$(get_available_firewall)
-	local ZONE="public"
-	local COMMENT=""
-	while [ $# -ge 1 ]; do
-		case $1 in
-			--port)
-				shift
-				PORT=$1
-				;;
-			--tcp|--udp)
-				PROTO=${1:2}
-				;;
-			--proto)
-				shift
-				PROTO=$1
-				;;
-			--source|--from)
-				shift
-				SOURCE=$1
-				;;
-			--zone)
-				shift
-				ZONE=$1
-				;;
-			--comment)
-				shift
-				COMMENT=$1
-				;;
-			*)
-				PORT=$1
-				;;
-		esac
-		shift
-	done
 
-	if [ "$PORT" == "" -a "$ZONE" != "trusted" ]; then
-		echo "firewall_allow: No port specified!" >&2
-		return 2
-	fi
-
-	if [ "$PORT" != "" -a "$ZONE" == "trusted" ]; then
-		echo "firewall_allow: Trusted zones do not use ports!" >&2
-		return 2
-	fi
-
-	if [ "$ZONE" == "trusted" -a "$SOURCE" == "any" ]; then
-		echo "firewall_allow: Trusted zones require a source!" >&2
-		return 2
-	fi
-
-	if [ "$FIREWALL" == "ufw" ]; then
-		if [ "$SOURCE" == "any" ]; then
-			echo "firewall_allow/UFW: Allowing $PORT/$PROTO from any..."
-			ufw allow proto $PROTO to any port $PORT comment "$COMMENT"
-		elif [ "$ZONE" == "trusted" ]; then
-			echo "firewall_allow/UFW: Allowing all connections from $SOURCE..."
-			ufw allow from $SOURCE comment "$COMMENT"
-		else
-			echo "firewall_allow/UFW: Allowing $PORT/$PROTO from $SOURCE..."
-			ufw allow from $SOURCE proto $PROTO to any port $PORT comment "$COMMENT"
-		fi
-		return 0
-	elif [ "$FIREWALL" == "firewalld" ]; then
-		if [ "$SOURCE" != "any" ]; then
-			# Firewalld uses Zones to specify sources
-			echo "firewall_allow/firewalld: Adding $SOURCE to $ZONE zone..."
-			firewall-cmd --zone=$ZONE --add-source=$SOURCE --permanent
-		fi
-
-		if [ "$PORT" != "" ]; then
-			echo "firewall_allow/firewalld: Allowing $PORT/$PROTO in $ZONE zone..."
-			if [[ "$PORT" =~ ":" ]]; then
-				# firewalld expects port ranges to be in the format of "#-#" vs "#:#"
-				local DPORTS="${PORT/:/-}"
-				firewall-cmd --zone=$ZONE --add-port=$DPORTS/$PROTO --permanent
-			elif [[ "$PORT" =~ "," ]]; then
-				# Firewalld cannot handle multiple ports all that well, so split them by the comma
-				# and run the add command separately for each port
-				local DPORTS="$(echo $PORT | sed 's:,: :g')"
-				for P in $DPORTS; do
-					firewall-cmd --zone=$ZONE --add-port=$P/$PROTO --permanent
-				done
-			else
-				firewall-cmd --zone=$ZONE --add-port=$PORT/$PROTO --permanent
-			fi
-		fi
-
-		firewall-cmd --reload
-		return 0
-	elif [ "$FIREWALL" == "iptables" ]; then
-		echo "firewall_allow/iptables: WARNING - iptables is untested"
-		# iptables doesn't natively support multiple ports, so we have to get creative
-		if [[ "$PORT" =~ ":" ]]; then
-			local DPORTS="-m multiport --dports $PORT"
-		elif [[ "$PORT" =~ "," ]]; then
-			local DPORTS="-m multiport --dports $PORT"
-		else
-			local DPORTS="--dport $PORT"
-		fi
-
-		if [ "$SOURCE" == "any" ]; then
-			echo "firewall_allow/iptables: Allowing $PORT/$PROTO from any..."
-			iptables -A INPUT -p $PROTO $DPORTS -j ACCEPT
-		else
-			echo "firewall_allow/iptables: Allowing $PORT/$PROTO from $SOURCE..."
-			iptables -A INPUT -p $PROTO $DPORTS -s $SOURCE -j ACCEPT
-		fi
-		iptables-save > /etc/iptables/rules.v4
-		return 0
-	elif [ "$FIREWALL" == "none" ]; then
-		echo "firewall_allow: No firewall detected" >&2
-		return 1
-	else
-		echo "firewall_allow: Unsupported or unknown firewall" >&2
-		echo 'Please report this at https://github.com/cdp1337/ScriptsCollection/issues' >&2
-		return 1
-	fi
-}
 
 print_header "$GAME_DESC *unofficial* Installer"
 
@@ -1132,7 +1149,6 @@ print_header "$GAME_DESC *unofficial* Installer"
 #   GAME_DIR     - Directory to install the game into
 #   STEAM_ID     - Steam App ID of the game
 #   GAME_DESC    - Description of the game (for logging purposes)
-#   GAME_SERVICE - Service name to install with Systemd
 #   SAVE_DIR     - Directory to store game save files
 #
 function install_application() {
@@ -1145,111 +1161,36 @@ function install_application() {
 		useradd -m -U $GAME_USER
 	fi
 
+	# Ensure the target directory exists and is owned by the game user
+	if [ ! -d "$GAME_DIR" ]; then
+		mkdir -p "$GAME_DIR"
+		chown $GAME_USER:$GAME_USER "$GAME_DIR"
+	fi
+
 	# Preliminary requirements
 	package_install curl sudo python3-venv python3-pip unzip
 
 	if [ "$FIREWALL" == "1" ]; then
 		if [ "$(get_enabled_firewall)" == "none" ]; then
 			# No firewall installed, go ahead and install UFW
-			install_ufw
+			firewall_install
 		fi
 	fi
 
 	[ -e "$GAME_DIR/AppFiles" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/AppFiles"
+	[ -e "$GAME_DIR/Configs" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/Configs"
+	[ -e "$GAME_DIR/Packages" ] || sudo -u $GAME_USER mkdir -p "$GAME_DIR/Packages"
 
 	# Hytale requires Java and recommends JRE 25.x, so manually install it so we can ensure compatibility.
-	local JAVA_PATH="$(install_openjdk 25)"
-
-	# They also ship their own downloader, so grab that too
-	download https://downloader.hytale.com/hytale-downloader.zip "$GAME_DIR/AppFiles/hytale-downloader.zip"
-	unzip -o "$GAME_DIR/AppFiles/hytale-downloader.zip" -d "$GAME_DIR/AppFiles/"
-
-	# At the moment Hytale requires authentication to download the server files,
-	# so we must install the game binary here vs inside the management console.
-	cd "$GAME_DIR/AppFiles/"
-	echo ""
-	echo ""
-	echo "====================================================="
-	echo ""
-	echo " IMPORTANT: Hytale Server Requires Authentication! "
-	echo ""
-	echo "====================================================="
-	echo ""
-	echo "You may be prompted to open a URL in your web browser to"
-	echo "authenticate your server."
-	echo ""
-	echo "Please open the link and authenticate if prompted."
-	./hytale-downloader-linux-amd64 -print-version
-	cd -
-	chown -R $GAME_USER:$GAME_USER "$GAME_DIR/AppFiles/"
-
+	install_openjdk 25
 	
 	# Install the management script
-	install_warlock_manager "$REPO" "$BRANCH"
-
-	# If other PIP packages are required for your management interface,
-	# add them here as necessary, for example for RCON support:
-	#  sudo -u $GAME_USER $GAME_DIR/.venv/bin/pip install rcon
-
-	# Set the requested game branch for the manager to use
-	sudo -u $GAME_USER $GAME_DIR/manage.py set-config "Game Branch" "$GAME_BRANCH"
+	install_warlock_manager "$REPO" "$BRANCH" 2.2.6
 
 	# Install installer (this script) for uninstallation or manual work
 	download "https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/dist/installer.sh" "$GAME_DIR/installer.sh"
 	chmod +x "$GAME_DIR/installer.sh"
 	chown $GAME_USER:$GAME_USER "$GAME_DIR/installer.sh"
-	
-	# Use the management script to install the game server
-	if ! $GAME_DIR/manage.py update; then
-		echo "Could not install $GAME_DESC, exiting" >&2
-		exit 1
-	fi
-
-	firewall_allow --port 5520 --udp --comment "${GAME_DESC} Game Port"
-
-	# Install system service file to be loaded by systemd
-    cat > /etc/systemd/system/${GAME_SERVICE}.service <<EOF
-[Unit]
-# DYNAMICALLY GENERATED FILE! Edit at your own risk
-Description=$GAME_DESC
-After=network.target
-
-[Service]
-Type=simple
-LimitNOFILE=10000
-User=$GAME_USER
-Group=$GAME_USER
-Sockets=$GAME_SERVICE.socket
-StandardInput=socket
-StandardOutput=journal
-StandardError=journal
-WorkingDirectory=$GAME_DIR/AppFiles
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u $GAME_USER)
-ExecStart=${JAVA_PATH}bin/java -server -Xms1024M -Xmx16G -XX:MaxMetaspaceSize=512M -XX:+UnlockExperimentalVMOptions -XX:+UseShenandoahGC -XX:ShenandoahGCHeuristics=compact -XX:ShenandoahUncommitDelay=30000 -XX:ShenandoahAllocationThreshold=15 -XX:ShenandoahGuaranteedGCInterval=30000 -XX:+PerfDisableSharedMem -XX:+DisableExplicitGC -XX:+ParallelRefProcEnabled -XX:ParallelGCThreads=4 -XX:ConcGCThreads=2 -XX:+AlwaysPreTouch -jar $GAME_DIR/AppFiles/Server/HytaleServer.jar --assets $GAME_DIR/AppFiles/Assets.zip --accept-early-plugins
-ExecStop=$GAME_DIR/manage.py pre-stop --service ${GAME_SERVICE}
-ExecStartPost=$GAME_DIR/manage.py post-start --service ${GAME_SERVICE}
-Restart=on-failure
-RestartSec=1800s
-TimeoutStartSec=600s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-	cat > /etc/systemd/system/${GAME_SERVICE}.socket <<EOF
-[Unit]
-# DYNAMICALLY GENERATED FILE! Edit at your own risk
-BindsTo=$GAME_SERVICE.service
-
-[Socket]
-ListenFIFO=/var/run/$GAME_SERVICE.socket
-Service=$GAME_SERVICE.service
-RemoveOnStop=true
-SocketMode=0660
-SocketUser=$GAME_USER
-User=$GAME_USER
-Group=$GAME_USER
-EOF
-    systemctl daemon-reload
 
 	if [ -n "$WARLOCK_GUID" ]; then
 		# Register Warlock
@@ -1266,6 +1207,90 @@ function postinstall() {
 }
 
 ##
+# Upgrade logic for 1.0 to 2.2 to handle migration of ENV and overrides
+#
+function upgrade_application_1_0() {
+	local LEGACY_SERVICE="hytale-server"
+	local SERVICE_PATH="/etc/systemd/system/${LEGACY_SERVICE}.service"
+
+	# Migrate existing service to new format
+	# This gets overwrote by the manager, but is needed to tell the system that the service is here.
+	if [ -e "${SERVICE_PATH}" ] && [ ! -e "$GAME_DIR/Environments" ]; then
+		sudo -u $GAME_USER mkdir -p "$GAME_DIR/Environments"
+		# Extract out current environment variables from the systemd file into their own dedicated file
+		egrep '^Environment' "${SERVICE_PATH}" | sed 's:^Environment=::' > "$GAME_DIR/Environments/${LEGACY_SERVICE}.env"
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/Environments/${LEGACY_SERVICE}.env"
+		# Trim out those envs now that they're not longer required
+		cat "${SERVICE_PATH}" | egrep -v '^Environment=' > "${SERVICE_PATH}.new"
+		mv "${SERVICE_PATH}.new" "${SERVICE_PATH}"
+
+		if [ -e "${SERVICE_PATH}.d" ] && [ -e "${SERVICE_PATH}.d/override.conf" ]; then
+			# If there is an override, (used in version 1.0),
+			# grab the CLI and move it to a notes document so the operator can manually review it.
+			touch "$GAME_DIR/Notes.txt"
+			echo "    !! IMPORTANT - Service commands are now generated dynamically, " >> "$GAME_DIR/Notes.txt"
+			echo "    so please manually migrate the following CLI options to your game." >> "$GAME_DIR/Notes.txt"
+			echo "" >> "$GAME_DIR/Notes.txt"
+			egrep '^ExecStart=' "${SERVICE_PATH}.d/override.conf" >> "$GAME_DIR/Notes.txt"
+			chown $GAME_USER:$GAME_USER "$GAME_DIR/Notes.txt"
+			rm -fr "${SERVICE_PATH}.d/override.conf"
+			rm -fr "${SERVICE_PATH}.d"
+		fi
+	fi
+}
+
+##
+# Upgrade handler for 2.1 to 2.2
+function upgrade_application_2_1() {
+	if [ -e "$GAME_DIR/AppFiles/Server/HytaleServer.jar" ]; then
+
+		# 2.2 introduces multi-binary support for game servers, so if the server is present in the legacy path,
+		# move it to its new destination.
+		[ -d "$GAME_DIR/AppFiles/hytale-server" ] || mkdir -p "$GAME_DIR/AppFiles/hytale-server"
+		mv "$GAME_DIR/AppFiles/Server" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -d "$GAME_DIR/AppFiles/logs" ] && mv "$GAME_DIR/AppFiles/logs" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -d "$GAME_DIR/AppFiles/mods" ] && mv "$GAME_DIR/AppFiles/mods" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -d "$GAME_DIR/AppFiles/universe" ] && mv "$GAME_DIR/AppFiles/universe" "$GAME_DIR/AppFiles/hytale-server/"
+		[ -e "$GAME_DIR/AppFiles/Assets.zip" ] && mv "$GAME_DIR/AppFiles/Assets.zip" "$GAME_DIR/AppFiles/hytale-server/Assets.zip"
+		[ -e "$GAME_DIR/AppFiles/auth.enc" ] && [ ! -e "$GAME_DIR/Configs/auth.enc" ] && cp "$GAME_DIR/AppFiles/auth.enc" "$GAME_DIR/Configs/auth.enc"
+		[ -e "$GAME_DIR/AppFiles/auth.enc" ] && mv "$GAME_DIR/AppFiles/auth.enc" "$GAME_DIR/AppFiles/hytale-server/auth.enc"
+		[ -e "$GAME_DIR/AppFiles/bans.json" ] && mv "$GAME_DIR/AppFiles/bans.json" "$GAME_DIR/AppFiles/hytale-server/bans.json"
+		[ -e "$GAME_DIR/AppFiles/config.json" ] && mv "$GAME_DIR/AppFiles/config.json" "$GAME_DIR/AppFiles/hytale-server/config.json"
+		[ -e "$GAME_DIR/AppFiles/permissions.json" ] && mv "$GAME_DIR/AppFiles/permissions.json" "$GAME_DIR/AppFiles/hytale-server/permissions.json"
+		[ -e "$GAME_DIR/AppFiles/whitelist.json" ] && mv "$GAME_DIR/AppFiles/whitelist.json" "$GAME_DIR/AppFiles/hytale-server/whitelist.json"
+		[ -e "$GAME_DIR/AppFiles/universe.tgz" ] && mv "$GAME_DIR/AppFiles/universe.tgz" "$GAME_DIR/AppFiles/hytale-server/universe.tgz"
+
+		# Move update zips to the Packages directory
+		for pkg in "$GAME_DIR/AppFiles/"*.zip; do
+			file="$(basename $pkg)"
+			if [ "$file" != "*.zip" ]; then
+				mv "$GAME_DIR/AppFiles/$file" "$GAME_DIR/Packages/$file"
+			fi
+		done
+
+		# Move the updater to the Packages directory
+		[ -e "$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" ] && mv "$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" "$GAME_DIR/Packages/hytale-downloader-linux-amd64"
+		[ -e "$GAME_DIR/AppFiles/hytale-downloader-windows-amd64.exe" ] && mv "$GAME_DIR/AppFiles/hytale-downloader-windows-amd64.exe" "$GAME_DIR/Packages/hytale-downloader-windows-amd64.exe"
+
+		# Chown everything to the appropriate user
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/AppFiles" -R
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/Packages" -R
+		chown $GAME_USER:$GAME_USER "$GAME_DIR/Configs" -R
+	fi
+}
+
+##
+# Perform any steps necessary for upgrading an existing installation.
+#
+function upgrade_application() {
+	print_header "Existing installation detected, performing upgrade"
+
+	# Uncomment if you need this
+	upgrade_application_1_0
+	upgrade_application_2_1
+}
+
+##
 # Uninstall the game server
 #
 # Expects the following variables:
@@ -1276,15 +1301,7 @@ function postinstall() {
 function uninstall_application() {
 	print_header "Performing uninstall_application"
 
-	systemctl disable $GAME_SERVICE
-	systemctl stop $GAME_SERVICE
-
-	# Service files
-	[ -e "/etc/systemd/system/${GAME_SERVICE}.service" ] && rm "/etc/systemd/system/${GAME_SERVICE}.service"
-	[ -e "/etc/systemd/system/${GAME_SERVICE}.socket" ] && rm "/etc/systemd/system/${GAME_SERVICE}.socket"
-
-	# Game files
-	[ -d "$GAME_DIR" ] && rm -rf "$GAME_DIR/AppFiles"
+	$GAME_DIR/manage.py remove --confirm
 
 	# Management scripts
 	[ -e "$GAME_DIR/manage.py" ] && rm "$GAME_DIR/manage.py"
@@ -1303,16 +1320,28 @@ function uninstall_application() {
 
 if [ $MODE_UNINSTALL -eq 1 ]; then
 	MODE="uninstall"
+elif [ -e "$GAME_DIR/AppFiles" ]; then
+	MODE="reinstall"
 else
 	# Default to install mode
 	MODE="install"
 fi
 
 
-if systemctl -q is-active $GAME_SERVICE; then
-	echo "$GAME_DESC service is currently running, please stop it before running this installer."
-	echo "You can do this with: sudo systemctl stop $GAME_SERVICE"
-	exit 1
+if [ -e "$GAME_DIR/Environments" ]; then
+	# Check for existing service files to determine if the service is running.
+	# This is important to prevent conflicts with the installer trying to modify files while the service is running.
+	for envfile in "$GAME_DIR/Environments/"*.env; do
+		SERVICE=$(basename "$envfile" .env)
+		# If there are no services, this will just be '*.env'.
+		if [ "$SERVICE" != "*" ]; then
+			if systemctl -q is-active $SERVICE; then
+				echo "$GAME_DESC service is currently running, please stop all instances before running this installer."
+				echo "You can do this with: sudo systemctl stop $SERVICE"
+				exit 1
+			fi
+		fi
+	done
 fi
 
 if [ -n "$OVERRIDE_DIR" ]; then
@@ -1338,11 +1367,6 @@ else
 	echo "Using default installation directory of ${GAME_DIR}"
 fi
 
-if [ -e "/etc/systemd/system/${GAME_SERVICE}.service" ]; then
-	EXISTING=1
-else
-	EXISTING=0
-fi
 
 ############################################
 ## Installer
@@ -1367,6 +1391,26 @@ if [ "$MODE" == "install" ]; then
     print_header "$GAME_DESC Installation Complete"
 fi
 
+# Operations needed to be performed during a reinstallation / upgrade
+if [ "$MODE" == "reinstall" ]; then
+
+	FIREWALL=0
+
+	upgrade_application
+
+	install_application
+
+	postinstall
+
+	# Print some instructions and useful tips
+    print_header "$GAME_DESC Installation Complete"
+
+	# If there are notes generated during installation, print them now.
+    if [ -e "$GAME_DIR/Notes.txt" ]; then
+    	cat "$GAME_DIR/Notes.txt"
+	fi
+fi
+
 if [ "$MODE" == "uninstall" ]; then
 	if [ $NONINTERACTIVE -eq 0 ]; then
 		if prompt_yn -q --invert --default-no "This will remove all game binary content"; then
@@ -1378,8 +1422,10 @@ if [ "$MODE" == "uninstall" ]; then
 	fi
 
 	if prompt_yn -q --default-yes "Perform a backup before everything is wiped?"; then
-		$GAME_DIR/manage.py --backup
+		$GAME_DIR/manage.py backup
 	fi
 
 	uninstall_application
 fi
+
+}

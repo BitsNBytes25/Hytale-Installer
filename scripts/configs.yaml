@@ -38,7 +38,7 @@ config:
       - Adventure
       - Creative
       - Survival
-manager:
+service:
   - name: Game Branch
     section: Version
     key: game_branch
@@ -48,6 +48,42 @@ manager:
     options:
       - latest
       - pre-release
+    group: Settings
+  - name: Authentication Mode
+    section: JarParams
+    key: auth-mode
+    type: str
+    options:
+      - authenticated
+      - offline
+      - insecure
+    default: authenticated
+    group: Settings
+  - name: Bind Port
+    section: JarParams
+    key: bind
+    type: int
+    default: 5520
+    group: Settings
+  - name: Accept Early Plugins
+    section: JarParams
+    key: accept-early-plugins
+    type: bool
+    default: true
+    group: Settings
+  - name: Java Initial Heap Size
+    section: JavaParams
+    key: Xms
+    type: str
+    default: 1024M
+    group: Settings
+  - name: Java Maximum Heap Size
+    section: JavaParams
+    key: Xmx
+    type: str
+    default: 16G
+    group: Settings
+manager:
   - name: Delayed Shutdown Warning
     section: Messages
     key: shutdown_delayed
