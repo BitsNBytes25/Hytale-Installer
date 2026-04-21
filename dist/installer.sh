@@ -1431,5 +1431,3 @@ if [ "$MODE" == "uninstall" ]; then
 
 	uninstall_application
 fi
-
-}
