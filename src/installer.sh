@@ -110,7 +110,7 @@ function install_application() {
 	install_openjdk 25
 	
 	# Install the management script
-	install_warlock_manager "$REPO" "$BRANCH" 2.2.6
+	install_warlock_manager "$REPO" "$BRANCH" 2.2.7
 
 	# Install installer (this script) for uninstallation or manual work
 	download "https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/dist/installer.sh" "$GAME_DIR/installer.sh"
@@ -199,6 +199,7 @@ function upgrade_application_2_1() {
 		# Move the updater to the Packages directory
 		[ -e "$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" ] && mv "$GAME_DIR/AppFiles/hytale-downloader-linux-amd64" "$GAME_DIR/Packages/hytale-downloader-linux-amd64"
 		[ -e "$GAME_DIR/AppFiles/hytale-downloader-windows-amd64.exe" ] && mv "$GAME_DIR/AppFiles/hytale-downloader-windows-amd64.exe" "$GAME_DIR/Packages/hytale-downloader-windows-amd64.exe"
+		[ -e "$GAME_DIR/AppFiles/.hytale-downloader-credentials.json" ] && mv "$GAME_DIR/AppFiles/.hytale-downloader-credentials.json" "$GAME_DIR/Packages/.hytale-downloader-credentials.json"
 
 		# Chown everything to the appropriate user
 		chown $GAME_USER:$GAME_USER "$GAME_DIR/AppFiles" -R
@@ -304,8 +305,9 @@ fi
 if [ "$MODE" == "install" ]; then
 
 	if [ $SKIP_FIREWALL -eq 1 ]; then
+		echo "Firewall explictly disabled, skipping installation of a system firewall"
 		FIREWALL=0
-	elif [ $EXISTING -eq 0 ] && prompt_yn -q --default-yes "Install system firewall?"; then
+	elif prompt_yn -q --default-yes "Install system firewall?"; then
 		FIREWALL=1
 	else
 		FIREWALL=0

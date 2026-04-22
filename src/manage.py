@@ -515,7 +515,7 @@ Please open the link and authenticate if prompted.
 		Force the game server to save the world via the game API
 		:return:
 		"""
-		self.cmd('/world save')
+		self.cmd('/world save --confirm --all')
 
 	def get_commands(self) -> None | list[str]:
 		"""
